@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Project>
+
+  <PropertyGroup>
+    <Authors>Shuai Zhang</Authors>
+    <Company>Shuai Zhang</Company>
+    <Copyright>Copyright 2017 Shuai Zhang under GPLv3</Copyright>
+    <Description>This C# project provide a service to establish an epidemic-style broadcast infrastructure. See project site for further details.</Description>
+    <PackageLicenseUrl>https://www.gnu.org/licenses/gpl-3.0-standalone.html</PackageLicenseUrl>
+    <PackageProjectUrl>https://github.com/hcoona/EpidemicBroadcastService.Net</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hcoona/EpidemicBroadcastService.Net</RepositoryUrl>
+    <RepositoryType>Git</RepositoryType>
+    <PackageTags>gossip epidemic broadcast</PackageTags>
+    <PackageReleaseNotes>$(Description)</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nerdbank.GitVersioning" Version="2.1.23" PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>
