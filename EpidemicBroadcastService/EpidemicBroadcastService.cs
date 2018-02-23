@@ -3,30 +3,29 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Clocks;
-#if NETSTANDARD2_0
 using Microsoft.Extensions.Hosting;
-#endif
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace EpidemicBroadcastService
 {
-#if NETSTANDARD2_0
     public sealed class EpidemicBroadcastService : IHostedService
-#else
-    public sealed class EpidemicBroadcastService
-#endif
     {
         public EpidemicBroadcastService(
-            IStopwatchProvider stopwatchProvider,
-            EpidemicBroadcastServiceOption options)
+            ILogger<EpidemicBroadcastService> logger,
+            IOptions<EpidemicBroadcastServiceOption> options,
+            IStopwatchProvider stopwatchProvider)
         {
+            this.logger = logger;
+            this.options = options.Value;
             this.stopwatchProvider = stopwatchProvider;
-            this.options = options;
 
             gossiperImpl = new GossiperImpl();
         }
 
-        private readonly IStopwatchProvider stopwatchProvider;
+        private readonly ILogger<EpidemicBroadcastService> logger;
         private readonly EpidemicBroadcastServiceOption options;
+        private readonly IStopwatchProvider stopwatchProvider;
         private readonly GossiperImpl gossiperImpl;
 
         public Gossiper.GossiperBase GossiperImpl => gossiperImpl;
@@ -51,8 +50,9 @@ namespace EpidemicBroadcastService
             }
 
             serviceImpl = new EpidemicBroadcastServiceImpl(
-                stopwatchProvider,
+                logger,
                 options,
+                stopwatchProvider,
                 gossiperImpl,
                 MemberListProvider,
                 GossiperClientFactory,

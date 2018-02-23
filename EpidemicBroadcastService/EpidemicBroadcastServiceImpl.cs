@@ -5,14 +5,16 @@ using System.Threading;
 using System.Threading.Tasks;
 using Clocks;
 using EpidemicBroadcastService.Extensions;
+using Microsoft.Extensions.Logging;
 using Any = Google.Protobuf.WellKnownTypes.Any;
 
 namespace EpidemicBroadcastService
 {
     internal sealed class EpidemicBroadcastServiceImpl : IDisposable
     {
-        private readonly IStopwatchProvider stopwatchProvider;
+        private readonly ILogger logger;
         private readonly EpidemicBroadcastServiceOption options;
+        private readonly IStopwatchProvider stopwatchProvider;
         private readonly GossiperImpl gossiperImpl;
         private readonly Func<IReadOnlyList<string>> memberListProvider;
         private readonly Func<string, Gossiper.GossiperClient> gossiperClientFactory;
@@ -29,15 +31,17 @@ namespace EpidemicBroadcastService
         private readonly IDictionary<Any, int> rumorHigherCounterDictionary = new Dictionary<Any, int>();
 
         public EpidemicBroadcastServiceImpl(
-            IStopwatchProvider stopwatchProvider,
+            ILogger logger,
             EpidemicBroadcastServiceOption options,
+            IStopwatchProvider stopwatchProvider,
             GossiperImpl gossiperImpl,
             Func<IReadOnlyList<string>> memberListProvider,
             Func<string, Gossiper.GossiperClient> gossiperClientFactory,
             EventHandler<RumorReceivedEventArgs> onRumorReceived)
         {
-            this.stopwatchProvider = stopwatchProvider;
+            this.logger = logger;
             this.options = options;
+            this.stopwatchProvider = stopwatchProvider;
             this.gossiperImpl = gossiperImpl;
             this.memberListProvider = memberListProvider;
             this.gossiperClientFactory = gossiperClientFactory;
@@ -114,9 +118,9 @@ namespace EpidemicBroadcastService
 
                     await Task.WhenAll(activePushTask, activePullTask);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // log
+                    logger.LogError(ex, ex.ToString());
                 }
 
                 stopwatch.Stop();
@@ -127,7 +131,7 @@ namespace EpidemicBroadcastService
                 }
                 else
                 {
-                    // Log warning
+                    logger.LogWarning("The execution time too long: {0}", stopwatch.Elapsed);
                 }
             }
         }
@@ -157,6 +161,9 @@ namespace EpidemicBroadcastService
                     {
                         if (pushStateRumorCounterDictionary.IncreaseCounter(rumor) > pushCounterThreshold)
                         {
+                            logger.LogDebug(
+                                "Grant rumor {0} from push state to pull state because median counter rule.",
+                                rumor.GetHashCode());
                             pullStateRumorCounterDictionary[rumor] = 0;
                             pushStateRumorCounterDictionary.Remove(rumor);
                         }
@@ -168,6 +175,9 @@ namespace EpidemicBroadcastService
             {
                 if (pullStateRumorCounterDictionary[rumor]++ > pullCounterThreshold)
                 {
+                    logger.LogDebug(
+                        "Grant rumor {0} from pull state to dead state because reach threshold.",
+                        rumor.GetHashCode());
                     deadStateRumorCounterDictionary.Add(rumor, 0);
                     pullStateRumorCounterDictionary.Remove(rumor);
                 }
@@ -177,6 +187,9 @@ namespace EpidemicBroadcastService
             {
                 if (deadStateRumorCounterDictionary[rumor]++ > deadCounterThreshold)
                 {
+                    logger.LogDebug(
+                        "Evict rumor {0} from dead state because reach threshold.",
+                        rumor.GetHashCode());
                     deadStateRumorCounterDictionary.Remove(rumor);
                 }
             }
@@ -284,6 +297,7 @@ namespace EpidemicBroadcastService
                 if (!pullStateRumorCounterDictionary.ContainsKey(payload)
                     && !deadStateRumorCounterDictionary.ContainsKey(payload))
                 {
+                    logger.LogDebug("New rumor {0} received in push request", payload.GetHashCode());
                     onRumorReceived?.Invoke(this, new RumorReceivedEventArgs
                     {
                         Payload = payload
@@ -300,10 +314,14 @@ namespace EpidemicBroadcastService
             {
                 pushStateRumorCounterDictionary.Remove(payload);
                 pullStateRumorCounterDictionary.Add(payload, 1);
+                logger.LogDebug(
+                    "Grant rumor {0} from push state to pull state because received in pull response.",
+                    payload.GetHashCode());
             }
             else if (!pullStateRumorCounterDictionary.ContainsKey(payload)
                 && !deadStateRumorCounterDictionary.ContainsKey(payload))
             {
+                logger.LogDebug("New rumor {0} received in pull response", payload.GetHashCode());
                 onRumorReceived?.Invoke(this, new RumorReceivedEventArgs
                 {
                     Payload = payload
