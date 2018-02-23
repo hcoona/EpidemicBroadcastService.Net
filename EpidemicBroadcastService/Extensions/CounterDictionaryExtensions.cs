@@ -17,5 +17,17 @@ namespace EpidemicBroadcastService.Extensions
             }
             return counterDictionary[key] = value;
         }
+
+        public static int GetOrDefault<T>(this IDictionary<T, int> counterDictionary, T key, int @default = default)
+        {
+            if (counterDictionary.TryGetValue(key, out var counter))
+            {
+                return counter;
+            }
+            else
+            {
+                return @default;
+            }
+        }
     }
 }

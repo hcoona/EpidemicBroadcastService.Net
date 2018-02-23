@@ -6,6 +6,7 @@ using Clocks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Any = Google.Protobuf.WellKnownTypes.Any;
 
 namespace EpidemicBroadcastService
 {
@@ -35,7 +36,7 @@ namespace EpidemicBroadcastService
         public Func<string, Gossiper.GossiperClient> GossiperClientFactory { get; set; }
         public event EventHandler<RumorReceivedEventArgs> OnRumorReceived;
 
-        private IDisposable serviceImpl;
+        private EpidemicBroadcastServiceImpl serviceImpl;
 
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
@@ -65,5 +66,7 @@ namespace EpidemicBroadcastService
             serviceImpl.Dispose();
             return Task.FromResult<object>(null);
         }
+
+        public void Broadcast(Any rumor) => serviceImpl.Broadcast(rumor);
     }
 }

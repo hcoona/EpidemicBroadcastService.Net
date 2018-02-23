@@ -7,6 +7,7 @@ using Clocks;
 using EpidemicBroadcastService.Extensions;
 using Microsoft.Extensions.Logging;
 using Any = Google.Protobuf.WellKnownTypes.Any;
+using GrpcException = Grpc.Core.RpcException;
 
 namespace EpidemicBroadcastService
 {
@@ -47,24 +48,33 @@ namespace EpidemicBroadcastService
             this.gossiperClientFactory = gossiperClientFactory;
             this.onRumorReceived = onRumorReceived;
 
-            gossiperImpl.OnPull += GossiperImpl_OnPull;
-            gossiperImpl.OnPush += GossiperImpl_OnPush;
+            gossiperImpl.OnPull += PassivePullRumors;
+            gossiperImpl.OnPush += PassivePushRumors;
 
             backgroundTaskCancellationTokenSource = new CancellationTokenSource();
             backgroundTask = Task.Factory.StartNew(
                 () => RunBackgroundTaskAsync(backgroundTaskCancellationTokenSource.Token).GetAwaiter().GetResult(),
                 backgroundTaskCancellationTokenSource.Token,
                 TaskCreationOptions.LongRunning,
-                Task.Factory.Scheduler);
+                TaskScheduler.Current);
         }
 
         public void Dispose()
         {
-            gossiperImpl.OnPull -= GossiperImpl_OnPull;
-            gossiperImpl.OnPush -= GossiperImpl_OnPush;
+            gossiperImpl.OnPull -= PassivePullRumors;
+            gossiperImpl.OnPush -= PassivePushRumors;
 
             backgroundTaskCancellationTokenSource.Cancel();
             backgroundTask.GetAwaiter().GetResult();
+        }
+
+        public void Broadcast(Any rumor)
+        {
+            onRumorReceived?.Invoke(this, new RumorReceivedEventArgs
+            {
+                Payload = rumor
+            });
+            pushStateRumorCounterDictionary.Add(rumor, 1);
         }
 
         private async Task RunBackgroundTaskAsync(CancellationToken cancellationToken)
@@ -92,7 +102,10 @@ namespace EpidemicBroadcastService
                     await semaphore.ProtectAsync(() =>
                     {
                         UpdateCounterThresholds(memberList);
+                        logger.LogDebug("Counter thresholds updated");
+
                         UpdateRumorCountersFromPreviousRound();
+                        logger.LogDebug("Rumor counters updated");
 
                         rumorsToBeSent = pushStateRumorCounterDictionary
                             .Select(p => new Rumor
@@ -102,31 +115,35 @@ namespace EpidemicBroadcastService
                             })
                             .ToArray();
                     }, cancellationToken);
-
+                    
                     // 2. Send push requests
+                    logger.LogDebug("Pushing {0} rumors", rumorsToBeSent.Count);
                     var activePushTask = ActivePushRumors(random, memberList, rumorsToBeSent, cancellationToken);
 
                     // 3. Send pull requests (switch to C states & clear lower, higher counter)
-                    var pulledRumors = await ActivePullRumors(random, memberList, cancellationToken);
+                    var pulledRumors = (await ActivePullRumors(random, memberList, cancellationToken)).ToArray();
+                    logger.LogDebug("Pulled {0} rumors", pulledRumors.Count());
                     var activePullTask = semaphore.ProtectAsync(() =>
                     {
                         foreach (var rumor in pulledRumors)
                         {
                             ReceivePulledRumor(rumor);
                         }
-                    });
+                    }, cancellationToken);
 
                     await Task.WhenAll(activePushTask, activePullTask);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, ex.ToString());
+                    logger.LogError(ex, ex.Message);
                 }
 
                 stopwatch.Stop();
+                logger.LogDebug("Background loop finished in {0}ms", stopwatch.Elapsed.TotalMilliseconds);
                 var sleepInterval = roundInterval - stopwatch.Elapsed;
                 if (sleepInterval > sleepMinimalInterval)
                 {
+                    logger.LogDebug("Background loop sleep {0}ms", sleepInterval.TotalMilliseconds);
                     await Task.Delay(sleepInterval);
                 }
                 else
@@ -144,18 +161,25 @@ namespace EpidemicBroadcastService
         {
             var memberCount = Math.Max(options.EstimatedNodeCountMin, memberList.Count);
             var doubleLogMemberCount = Math.Log(Math.Log(memberCount));
-            pushCounterThreshold = (int)(options.PushRoundsFactor * doubleLogMemberCount);
-            pullCounterThreshold = (int)(options.PullRoundsFactor * doubleLogMemberCount);
-            deadCounterThreshold = (int)(options.DeadRoundsFactor * doubleLogMemberCount);
+
+            pushCounterThreshold = Math.Max(1, (int)(options.PushRoundsFactor * doubleLogMemberCount));
+            logger.LogTrace("{0} = {1}", nameof(pushCounterThreshold), pushCounterThreshold);
+
+            pullCounterThreshold = Math.Max(1, (int)(options.PullRoundsFactor * doubleLogMemberCount));
+            logger.LogTrace("{0} = {1}", nameof(pullCounterThreshold), pullCounterThreshold);
+
+            deadCounterThreshold = Math.Max(1, (int)(options.DeadRoundsFactor * doubleLogMemberCount));
+            logger.LogTrace("{0} = {1}", nameof(deadCounterThreshold), deadCounterThreshold);
         }
 
         private void UpdateRumorCountersFromPreviousRound()
         {
             var rumorsNeedGrantFromPreviousRound = rumorLowerCounterDictionary.Keys
-                .Union(rumorHigherCounterDictionary.Keys);
+                .Union(rumorHigherCounterDictionary.Keys)
+                .ToArray();
             foreach (var rumor in rumorsNeedGrantFromPreviousRound)
             {
-                if (rumorLowerCounterDictionary[rumor] < rumorHigherCounterDictionary[rumor])
+                if (rumorLowerCounterDictionary.GetOrDefault(rumor) < rumorHigherCounterDictionary.GetOrDefault(rumor))
                 {
                     if (pushStateRumorCounterDictionary.ContainsKey(rumor))
                     {
@@ -171,7 +195,7 @@ namespace EpidemicBroadcastService
                 }
             }
 
-            foreach (var rumor in pullStateRumorCounterDictionary.Keys)
+            foreach (var rumor in pullStateRumorCounterDictionary.Keys.ToArray())
             {
                 if (pullStateRumorCounterDictionary[rumor]++ > pullCounterThreshold)
                 {
@@ -183,7 +207,7 @@ namespace EpidemicBroadcastService
                 }
             }
 
-            foreach (var rumor in deadStateRumorCounterDictionary.Keys)
+            foreach (var rumor in deadStateRumorCounterDictionary.Keys.ToArray())
             {
                 if (deadStateRumorCounterDictionary[rumor]++ > deadCounterThreshold)
                 {
@@ -205,20 +229,30 @@ namespace EpidemicBroadcastService
             CancellationToken cancellationToken)
         {
             var fanOutNodeCount = 1 + random.Next(options.FanOutNodeCountMax);
-            var fanOutClients = memberList
-                .RandomTake(random, fanOutNodeCount)
-                .Select(addr => gossiperClientFactory.Invoke(addr));
+            var fanOutNodes = memberList.RandomTake(random, fanOutNodeCount).ToArray();
+            logger.LogInformation("Pushing to nodes [{0}]", string.Join(",", fanOutNodes));
 
-            var pushTasks = fanOutClients.AsParallel()
-                .Select(async c =>
+            var pushTasks = fanOutNodes.AsParallel()
+                .Select(async target =>
                 {
-                    var pushTask = c.Push();
-                    foreach (var rumor in rumorsToBeSent)
+                    try
                     {
-                        if (cancellationToken.IsCancellationRequested) break;
-                        await pushTask.RequestStream.WriteAsync(rumor);
+                        var client = gossiperClientFactory.Invoke(target);
+                        var pushTask = client.Push(
+                            deadline: DateTime.UtcNow.AddMilliseconds(options.RoundIntervalMilliseconds / 2),
+                            cancellationToken: cancellationToken);
+                        foreach (var rumor in rumorsToBeSent)
+                        {
+                            if (cancellationToken.IsCancellationRequested) break;
+                            await pushTask.RequestStream.WriteAsync(rumor);
+                        }
+                        await pushTask.RequestStream.CompleteAsync();
+                        await pushTask;
                     }
-                    await pushTask;
+                    catch (GrpcException ex)
+                    {
+                        logger.LogError(ex, "Failed to push rumor to {0} because {1}", target, ex.Message);
+                    }
                 });
             await Task.WhenAll(pushTasks);
         }
@@ -229,32 +263,42 @@ namespace EpidemicBroadcastService
             CancellationToken cancellationToken)
         {
             var fanInNodeCount = 1 + random.Next(options.FanInNodeCountMax);
-            var fanInClients = memberList
-                .RandomTake(random, fanInNodeCount)
-                .Select(addr => gossiperClientFactory.Invoke(addr));
+            var fanInNodes = memberList.RandomTake(random, fanInNodeCount).ToArray();
+            logger.LogInformation("Pulling from nodes [{0}]", string.Join(",", fanInNodes));
 
-            var pullTasks = fanInClients.AsParallel()
-                .Select(c => ActivePullRumors(c, cancellationToken));
+            var pullTasks = fanInNodes.AsParallel()
+                .Select(target => ActivePullRumors(target, cancellationToken));
             await Task.WhenAll(pullTasks);
 
             return pullTasks.SelectMany(t => t.GetAwaiter().GetResult());
         }
 
         private async Task<IList<Rumor>> ActivePullRumors(
-            Gossiper.GossiperClient client,
+            string target,
             CancellationToken cancellationToken)
         {
             var results = new List<Rumor>();
-            var pullTask = client.Pull(new PullRequest());
-            while (!cancellationToken.IsCancellationRequested
-                && await pullTask.ResponseStream.MoveNext(cancellationToken))
+            try
             {
-                results.Add(pullTask.ResponseStream.Current);
+                var client = gossiperClientFactory.Invoke(target);
+                var pullTask = client.Pull(
+                    new PullRequest(),
+                    deadline: DateTime.UtcNow.AddMilliseconds(options.RoundIntervalMilliseconds / 2),
+                    cancellationToken: cancellationToken);
+                while (!cancellationToken.IsCancellationRequested
+                    && await pullTask.ResponseStream.MoveNext(cancellationToken))
+                {
+                    results.Add(pullTask.ResponseStream.Current);
+                }
+            }
+            catch (GrpcException ex)
+            {
+                logger.LogError(ex, "Failed to pull from {0} because {1}", target, ex.Message);
             }
             return results;
         }
 
-        private void GossiperImpl_OnPush(object sender, PushRumorEventArgs e)
+        private void PassivePushRumors(object sender, PushRumorEventArgs e)
         {
             Task.Run(() => semaphore.ProtectAsync(() =>
             {
@@ -265,7 +309,7 @@ namespace EpidemicBroadcastService
             }));
         }
 
-        private void GossiperImpl_OnPull(object sender, PullRumorEventArgs e)
+        private void PassivePullRumors(object sender, PullRumorEventArgs e)
         {
             semaphore.Protect(() =>
             {
